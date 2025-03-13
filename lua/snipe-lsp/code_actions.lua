@@ -7,7 +7,6 @@ local ms = require("vim.lsp.protocol").Methods
 local M = {}
 
 local function get_code_actions()
-	local mode = api.nvim_get_mode().mode
 	local bufnr = api.nvim_get_current_buf()
 	local win = api.nvim_get_current_win()
 	local clients = vim.lsp.get_clients({ bufnr = bufnr, method = ms.textDocument_codeAction })
@@ -40,11 +39,23 @@ local function get_code_actions()
 
 		local response = client.request_sync(ms.textDocument_codeAction, params, 1000, bufnr)
 		if response ~= nil and response.result ~= nil then
-			local a = response.result[1]
-			table.insert(items, {
-				title = a.title,
-				kind = a.kind,
-			})
+			for _, item in ipairs(response.result) do
+				local edits = {}
+				if item.edit and item.edit.documentChanges then
+					for _, change in ipairs(item.edit.documentChanges) do
+						if change.edits then
+							vim.list_extend(edits, change.edits)
+						end
+					end
+				end
+				table.insert(items, {
+					title = item.title,
+					kind = item.kind,
+					edits = edits,
+					encoding = client.offset_encoding,
+					bufnr = bufnr,
+				})
+			end
 		end
 	end
 
@@ -65,6 +76,13 @@ M.open_code_actions_menu = function()
 	add_close_keymap(menu)
 
 	menu:open(actions, function(m, i)
+		local to_apply = actions[i] -- the action that was queried before
+		if to_apply.edits == nil then
+			-- TODO: apply anyway?
+			m:close()
+			return
+		end
+		vim.lsp.util.apply_text_edits(to_apply.edits, to_apply.bufnr, to_apply.encoding)
 		m:close()
 	end, format_code_action_for_display)
 end
