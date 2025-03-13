@@ -7,58 +7,48 @@ local ms = require("vim.lsp.protocol").Methods
 local M = {}
 
 local function get_code_actions()
-	local bufnr = api.nvim_get_current_buf()
-	local win = api.nvim_get_current_win()
-	local clients = vim.lsp.get_clients({ bufnr = bufnr, method = ms.textDocument_codeAction })
-	local remaining = #clients
-	if remaining == 0 then
-		if next(vim.lsp.get_clients({ bufnr = bufnr })) then
-			vim.notify(vim.lsp._unsupported_method(ms.textDocument_codeAction), vim.log.levels.WARN)
-		end
+	local bufnr = vim.api.nvim_get_current_buf()
+	local win = vim.api.nvim_get_current_win()
+
+	local params = vim.lsp.util.make_range_params(win)
+	local diagnostics = vim.diagnostic.get(bufnr)
+	params.context = {
+		diagnostics = vim.tbl_map(function(d)
+			return d.user_data.lsp
+		end, diagnostics),
+	}
+
+	local actions = vim.lsp.buf_request_sync(bufnr, "textDocument/codeAction", params, 1000)
+	if not actions or vim.tbl_isempty(actions) then
+		vim.notify("No actions found", vim.log.levels.INFO)
 		return {}
 	end
-
 	local items = {}
-
-	for _, client in ipairs(clients) do
-		---@type lsp.CodeActionParams
-		local params = util.make_range_params(win, client.offset_encoding)
-
-		local ns_push = vim.lsp.diagnostic.get_namespace(client.id, false)
-		local ns_pull = vim.lsp.diagnostic.get_namespace(client.id, true)
-		local diagnostics = {}
-		local lnum = api.nvim_win_get_cursor(0)[1] - 1
-		vim.list_extend(diagnostics, vim.diagnostic.get(bufnr, { namespace = ns_pull, lnum = lnum }))
-		vim.list_extend(diagnostics, vim.diagnostic.get(bufnr, { namespace = ns_push, lnum = lnum }))
-		params.context = {
-			---@diagnostic disable-next-line: no-unknown
-			diagnostics = vim.tbl_map(function(d)
-				return d.user_data.lsp
-			end, diagnostics),
-		}
-
-		local response = client.request_sync(ms.textDocument_codeAction, params, 1000, bufnr)
-		if response ~= nil and response.result ~= nil then
-			for _, item in ipairs(response.result) do
-				local edits = {}
-				if item.edit and item.edit.documentChanges then
-					for _, change in ipairs(item.edit.documentChanges) do
-						if change.edits then
-							vim.list_extend(edits, change.edits)
-						end
+	for client_id, result in ipairs(actions) do
+		local client = vim.lsp.get_client_by_id(client_id)
+		if client == nil then
+			-- using goto feels wrong, anyway...
+			goto continue
+		end
+		for _, action in ipairs(result.result or {}) do
+			local edits = {}
+			if action.edit and action.edit.documentChanges then
+				for _, change in ipairs(action.edit.documentChanges) do
+					if change.edits then
+						vim.list_extend(edits, change.edits)
 					end
 				end
-				table.insert(items, {
-					title = item.title,
-					kind = item.kind,
-					edits = edits,
-					encoding = client.offset_encoding,
-					bufnr = bufnr,
-				})
 			end
+			table.insert(items, {
+				title = action.title,
+				kind = action.kind,
+				edits = edits,
+				encoding = client.offset_encoding,
+				bufnr = bufnr,
+			})
 		end
+		::continue::
 	end
-
 	return items
 end
 
@@ -76,9 +66,9 @@ M.open_code_actions_menu = function()
 	add_close_keymap(menu)
 
 	menu:open(actions, function(m, i)
-		local to_apply = actions[i] -- the action that was queried before
+		local to_apply = actions[i]
 		if to_apply.edits == nil then
-			-- TODO: apply anyway?
+			-- TODO: apply anyway
 			m:close()
 			return
 		end
